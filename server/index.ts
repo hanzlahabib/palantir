@@ -21,6 +21,7 @@ import maritimeRouter from "./routes/maritime.js";
 import newsRouter from "./routes/news.js";
 import trafficRouter from "./routes/traffic.js";
 import weatherRouter from "./routes/weather.js";
+import naturalEventsRouter from "./routes/naturalEvents.js";
 
 const app = express();
 const PORT = parseInt(process.env.PORT || "3001", 10);
@@ -39,7 +40,7 @@ app.use("/api/gdelt", gdeltRouter);
 app.use("/api/conflicts", conflictsRouter);
 app.use("/api/cctv", cctvRouter);
 app.use("/api/maritime", maritimeRouter);
-app.use("/api/events", maritimeRouter); // EONET events via maritime router
+app.use("/api/natural-events", naturalEventsRouter);
 app.use("/api/news", newsRouter);
 app.use("/api/roads", trafficRouter);
 app.use("/api/weather", weatherRouter);

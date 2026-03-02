@@ -28,6 +28,10 @@ import MiniMap from "@/hud/MiniMap";
 import DetectionMode from "@/hud/DetectionMode";
 import CameraPresets from "@/hud/CameraPresets";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
+import { useFusionEngine } from "@/hooks/useFusionEngine";
+import { useProximityAlerts } from "@/hooks/useProximityAlerts";
+import CCTVPanel from "@/hud/CCTVPanel";
+import ShaderControlPanel from "@/hud/ShaderControlPanel";
 import { Toaster } from "sonner";
 
 export default function App() {
@@ -42,6 +46,12 @@ export default function App() {
 
   // Global keyboard shortcuts
   useKeyboardShortcuts(viewer);
+
+  // Data fusion — cross-layer correlation every 30s
+  useFusionEngine();
+
+  // Cross-layer proximity alerts every 30s
+  useProximityAlerts();
 
   if (!booted) {
     return <BootSequence onComplete={() => setBooted(true)} />;
@@ -83,6 +93,8 @@ export default function App() {
       <ThreatGauge />
       <MiniMap />
       <CameraPresets viewer={viewer} />
+      <CCTVPanel viewer={viewer} />
+      <ShaderControlPanel />
       <ClassifiedWatermark />
 
       {/* Scanline overlay */}

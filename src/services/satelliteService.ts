@@ -48,3 +48,20 @@ export function getOrbitColor(orbit: string): string {
         default: return "#ffffff";
     }
 }
+
+export type SatelliteCategory = "stations" | "starlink" | "gps-ops" | "weather" | "resource" | "military" | "science" | "active";
+
+export const SATELLITE_CATEGORIES: { id: SatelliteCategory; label: string; group: string }[] = [
+    { id: "active", label: "ALL ACTIVE", group: "active" },
+    { id: "stations", label: "SPACE STATIONS", group: "stations" },
+    { id: "starlink", label: "STARLINK", group: "starlink" },
+    { id: "gps-ops", label: "GPS", group: "gps-ops" },
+    { id: "weather", label: "WEATHER", group: "weather" },
+    { id: "resource", label: "EARTH RESOURCES", group: "resource" },
+    { id: "military", label: "MILITARY", group: "military" },
+    { id: "science", label: "SCIENCE", group: "science" },
+];
+
+export async function fetchTLEsByCategory(category: SatelliteCategory): Promise<TLERecord[]> {
+    return fetchTLEs(category);
+}

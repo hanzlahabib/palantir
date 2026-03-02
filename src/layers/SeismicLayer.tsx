@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback } from "react";
 import * as Cesium from "cesium";
-import { fetchEarthquakes, getMagnitudeSize, getDepthColor, fetchFires } from "@/services/earthquakeService";
+import { fetchEarthquakes, getMagnitudeSize, getDepthColor, fetchFires, fetchNaturalEvents, getNaturalEventColor } from "@/services/earthquakeService";
 import { useLayerStore } from "@/stores/layerStore";
 import { useEntityStore } from "@/stores/entityStore";
 import { useAlertStore } from "@/stores/alertStore";
@@ -20,7 +20,10 @@ export default function SeismicLayer({ viewer }: SeismicLayerProps) {
     const selectEntity = useEntityStore((s) => s.selectEntity);
     const addAlert = useAlertStore((s) => s.addAlert);
     const eqDataSourceRef = useRef<Cesium.CustomDataSource | null>(null);
+    const waveDataSourceRef = useRef<Cesium.CustomDataSource | null>(null);
     const firePointsRef = useRef<Cesium.PointPrimitiveCollection | null>(null);
+    const eonetDsRef = useRef<Cesium.CustomDataSource | null>(null);
+    const waveAnimRef = useRef<number>(0);
     const eqIntervalRef = useRef<NodeJS.Timeout | null>(null);
     const fireIntervalRef = useRef<NodeJS.Timeout | null>(null);
     const seenEqRef = useRef<Set<string>>(new Set());
@@ -59,6 +62,41 @@ export default function SeismicLayer({ viewer }: SeismicLayerProps) {
                     } : undefined,
                 });
 
+                // Seismic wave animation for recent quakes (< 1 hour)
+                if (isRecent && eq.magnitude >= 3) {
+                    const waveDist = eq.magnitude * 50000; // meters based on magnitude
+                    const waveDs = waveDataSourceRef.current;
+                    if (waveDs) {
+                        waveDs.entities.add({
+                            id: `wave-${eq.id}`,
+                            position: Cesium.Cartesian3.fromDegrees(eq.lon, eq.lat),
+                            ellipse: {
+                                semiMajorAxis: waveDist,
+                                semiMinorAxis: waveDist,
+                                material: new Cesium.ColorMaterialProperty(color.withAlpha(0.15)),
+                                outline: true,
+                                outlineColor: new Cesium.ConstantProperty(color.withAlpha(0.6)),
+                                outlineWidth: new Cesium.ConstantProperty(1),
+                                height: 0,
+                            },
+                        });
+                        // Second ring — smaller
+                        waveDs.entities.add({
+                            id: `wave2-${eq.id}`,
+                            position: Cesium.Cartesian3.fromDegrees(eq.lon, eq.lat),
+                            ellipse: {
+                                semiMajorAxis: waveDist * 0.5,
+                                semiMinorAxis: waveDist * 0.5,
+                                material: new Cesium.ColorMaterialProperty(color.withAlpha(0.25)),
+                                outline: true,
+                                outlineColor: new Cesium.ConstantProperty(color.withAlpha(0.8)),
+                                outlineWidth: new Cesium.ConstantProperty(1),
+                                height: 0,
+                            },
+                        });
+                    }
+                }
+
                 // Alert for significant quakes
                 if (eq.magnitude >= 5 && !seenEqRef.current.has(eq.id)) {
                     seenEqRef.current.add(eq.id);
@@ -77,6 +115,35 @@ export default function SeismicLayer({ viewer }: SeismicLayerProps) {
 
             updateEntityCount("seismic", quakes.length);
             updateLastFetch("seismic");
+
+            // Also fetch EONET natural events
+            if (eonetDsRef.current) {
+                try {
+                    const events = await fetchNaturalEvents();
+                    const eoDs = eonetDsRef.current;
+                    eoDs.entities.removeAll();
+                    for (const evt of events) {
+                        const color = Cesium.Color.fromCssColorString(getNaturalEventColor(evt.category));
+                        eoDs.entities.add({
+                            id: `eonet-${evt.id}`,
+                            position: Cesium.Cartesian3.fromDegrees(evt.lon, evt.lat),
+                            point: { pixelSize: 10, color: color.withAlpha(0.9), outlineColor: color, outlineWidth: 2 },
+                            label: {
+                                text: `${evt.category.slice(0, 8)}`,
+                                font: "9px JetBrains Mono",
+                                fillColor: color,
+                                outlineColor: Cesium.Color.BLACK,
+                                outlineWidth: 2,
+                                style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+                                pixelOffset: new Cesium.Cartesian2(10, 0),
+                                scale: 0.7,
+                            },
+                        });
+                    }
+                } catch (err) {
+                    console.error("[SeismicLayer] EONET update failed:", err);
+                }
+            }
         } catch (err) {
             console.error("[SeismicLayer] Earthquake update failed:", err);
         }
@@ -117,18 +184,39 @@ export default function SeismicLayer({ viewer }: SeismicLayerProps) {
     // Earthquakes lifecycle
     useEffect(() => {
         if (!viewer || !seismicEnabled) {
-            if (eqDataSourceRef.current) {
-                viewer?.dataSources.remove(eqDataSourceRef.current);
-                eqDataSourceRef.current = null;
-            }
+            if (eqDataSourceRef.current) { viewer?.dataSources.remove(eqDataSourceRef.current); eqDataSourceRef.current = null; }
+            if (eonetDsRef.current) { viewer?.dataSources.remove(eonetDsRef.current); eonetDsRef.current = null; }
             if (eqIntervalRef.current) clearInterval(eqIntervalRef.current);
             return;
         }
 
         setLayerLoading("seismic", true);
         const ds = new Cesium.CustomDataSource("earthquakes");
+        const waveDs = new Cesium.CustomDataSource("seismic-waves");
+        const eonetDs = new Cesium.CustomDataSource("natural-events");
         viewer.dataSources.add(ds);
+        viewer.dataSources.add(waveDs);
+        viewer.dataSources.add(eonetDs);
         eqDataSourceRef.current = ds;
+        waveDataSourceRef.current = waveDs;
+        eonetDsRef.current = eonetDs;
+
+        // Animate wave rings — pulse alpha over time
+        let wavePhase = 0;
+        const animateWaves = () => {
+            wavePhase += 0.02;
+            for (let i = 0; i < waveDs.entities.values.length; i++) {
+                const ent = waveDs.entities.values[i];
+                if (ent?.ellipse?.material instanceof Cesium.ColorMaterialProperty) {
+                    const base = ent.id?.startsWith("wave2-") ? 0.5 : 1.0;
+                    const pulseAlpha = 0.1 + Math.abs(Math.sin(wavePhase + i * 0.3)) * 0.2 * base;
+                    const baseColor = Cesium.Color.fromCssColorString("#ff6600");
+                    ent.ellipse.material = new Cesium.ColorMaterialProperty(baseColor.withAlpha(pulseAlpha));
+                }
+            }
+            waveAnimRef.current = requestAnimationFrame(animateWaves);
+        };
+        waveAnimRef.current = requestAnimationFrame(animateWaves);
 
         updateEarthquakes().finally(() => setLayerLoading("seismic", false));
         eqIntervalRef.current = setInterval(updateEarthquakes, UPDATE_INTERVALS.seismic);
@@ -160,10 +248,19 @@ export default function SeismicLayer({ viewer }: SeismicLayerProps) {
 
         return () => {
             if (eqIntervalRef.current) clearInterval(eqIntervalRef.current);
+            cancelAnimationFrame(waveAnimRef.current);
             handler.destroy();
             if (eqDataSourceRef.current) {
                 viewer.dataSources.remove(eqDataSourceRef.current);
                 eqDataSourceRef.current = null;
+            }
+            if (waveDataSourceRef.current) {
+                viewer.dataSources.remove(waveDataSourceRef.current);
+                waveDataSourceRef.current = null;
+            }
+            if (eonetDsRef.current) {
+                viewer.dataSources.remove(eonetDsRef.current);
+                eonetDsRef.current = null;
             }
         };
     }, [viewer, seismicEnabled, updateEarthquakes, setLayerLoading, selectEntity]);

@@ -1,11 +1,13 @@
 import { useEffect, useRef, useCallback } from "react";
 import * as Cesium from "cesium";
 import { fetchMilitaryFlights, type MilitaryFlight } from "@/services/militaryFlightService";
-import { identifyCallsign, getClassificationColor } from "@/config/militaryCallsigns";
+import { identifyCallsign, getClassificationColor, HOTSPOTS } from "@/config/militaryCallsigns";
 import { useLayerStore } from "@/stores/layerStore";
 import { useEntityStore } from "@/stores/entityStore";
+import { useAlertStore } from "@/stores/alertStore";
 import { useCameraStore } from "@/stores/cameraStore";
 import { UPDATE_INTERVALS } from "@/config/constants";
+import { haversineDistance } from "@/utils/coordinateUtils";
 import type { MilitaryFlightEntity } from "@/types/entities";
 
 interface MilitaryFlightLayerProps {
@@ -18,7 +20,9 @@ export default function MilitaryFlightLayer({ viewer }: MilitaryFlightLayerProps
     const updateLastFetch = useLayerStore((s) => s.updateLastFetch);
     const setLayerLoading = useLayerStore((s) => s.setLayerLoading);
     const selectEntity = useEntityStore((s) => s.selectEntity);
+    const addAlert = useAlertStore((s) => s.addAlert);
     const detectionDensity = useCameraStore((s) => s.detectionDensity);
+    const seenHotspotAlertsRef = useRef<Set<string>>(new Set());
     const pointsRef = useRef<Cesium.PointPrimitiveCollection | null>(null);
     const labelsRef = useRef<Cesium.LabelCollection | null>(null);
     const flightsRef = useRef<MilitaryFlight[]>([]);
@@ -68,6 +72,30 @@ export default function MilitaryFlightLayer({ viewer }: MilitaryFlightLayerProps
 
             for (let i = flights.length; i < points.length; i++) points.get(i).show = false;
             if (labels) for (let i = flights.length; i < labels.length; i++) labels.get(i).show = false;
+
+            // Hotspot proximity alerts
+            for (const f of flights) {
+                for (const hotspot of HOTSPOTS) {
+                    const dist = haversineDistance(f.lat, f.lon, hotspot.lat, hotspot.lon);
+                    if (dist < hotspot.radiusKm * 1000) {
+                        const alertKey = `${f.hex}-${hotspot.name}`;
+                        if (!seenHotspotAlertsRef.current.has(alertKey)) {
+                            seenHotspotAlertsRef.current.add(alertKey);
+                            const callsign = (f.flight || "").trim();
+                            addAlert({
+                                id: `mil-hotspot-${alertKey}-${Date.now()}`,
+                                timestamp: Date.now(),
+                                level: "high",
+                                title: `MILITARY NEAR ${hotspot.name.toUpperCase()}`,
+                                description: `${callsign || f.hex} detected within ${(dist / 1000).toFixed(0)}km of ${hotspot.name}`,
+                                source: "military",
+                                lat: f.lat,
+                                lon: f.lon,
+                            });
+                        }
+                    }
+                }
+            }
 
             updateEntityCount("military", flights.length);
             updateLastFetch("military");

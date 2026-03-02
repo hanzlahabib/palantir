@@ -60,3 +60,47 @@ export async function fetchFires(): Promise<FireHotspot[]> {
     if (!resp.ok) throw new Error(`Fires fetch failed: ${resp.status}`);
     return resp.json();
 }
+
+export interface NaturalEvent {
+    id: string;
+    title: string;
+    category: string;
+    lat: number;
+    lon: number;
+    date: string;
+    source: string;
+}
+
+export async function fetchNaturalEvents(): Promise<NaturalEvent[]> {
+    const resp = await fetch(`${API_BASE}/natural-events`);
+    if (!resp.ok) throw new Error(`EONET fetch failed: ${resp.status}`);
+    const data = await resp.json();
+    if (!Array.isArray(data.events)) return [];
+    return data.events
+        .filter((e: any) => e.geometry?.length > 0)
+        .map((e: any): NaturalEvent => {
+            const geo = e.geometry[e.geometry.length - 1];
+            return {
+                id: e.id,
+                title: e.title,
+                category: e.categories?.[0]?.title || "Unknown",
+                lat: geo.coordinates?.[1] || 0,
+                lon: geo.coordinates?.[0] || 0,
+                date: geo.date || "",
+                source: e.sources?.[0]?.url || "",
+            };
+        })
+        .filter((e: NaturalEvent) => e.lat !== 0 && e.lon !== 0);
+}
+
+export function getNaturalEventColor(category: string): string {
+    switch (category.toLowerCase()) {
+        case "wildfires": return "#ff4400";
+        case "severe storms": return "#8844ff";
+        case "volcanoes": return "#ff0044";
+        case "floods": return "#0088ff";
+        case "sea and lake ice": return "#00ccff";
+        case "earthquakes": return "#ffaa00";
+        default: return "#ffffff";
+    }
+}

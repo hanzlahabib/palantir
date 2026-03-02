@@ -8,6 +8,12 @@ import { useCameraStore } from "@/stores/cameraStore";
 import type { FlightEntity } from "@/types/entities";
 import { UPDATE_INTERVALS } from "@/config/constants";
 
+function getHeadingArrow(heading: number): string {
+    const dirs = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"];
+    const idx = Math.round(((heading % 360) + 360) % 360 / 45) % 8;
+    return dirs[idx] || "↑";
+}
+
 interface FlightLayerProps {
     viewer: Cesium.Viewer | null;
 }
@@ -22,7 +28,9 @@ export default function FlightLayer({ viewer }: FlightLayerProps) {
     const detectionDensity = useCameraStore((s) => s.detectionDensity);
     const pointCollectionRef = useRef<Cesium.PointPrimitiveCollection | null>(null);
     const labelCollectionRef = useRef<Cesium.LabelCollection | null>(null);
+    const trailDataSourceRef = useRef<Cesium.CustomDataSource | null>(null);
     const flightsRef = useRef<FlightState[]>([]);
+    const positionHistoryRef = useRef<Map<string, { lat: number; lon: number; alt: number }[]>>(new Map());
     const intervalRef = useRef<NodeJS.Timeout | null>(null);
     const seenEmergenciesRef = useRef<Set<string>>(new Set());
 
@@ -64,6 +72,13 @@ export default function FlightLayer({ viewer }: FlightLayerProps) {
                     f.isEmergency ? "#ff0000" : getAltitudeColor(f.altitude)
                 );
 
+                // Track position history for trails (keep last 20)
+                const key = f.icao24;
+                const history = positionHistoryRef.current.get(key) || [];
+                history.push({ lat: f.lat, lon: f.lon, alt: f.altitude });
+                if (history.length > 20) history.shift();
+                positionHistoryRef.current.set(key, history);
+
                 const point = points.get(i);
                 point.position = position;
                 point.pixelSize = f.isEmergency ? 8 : 4;
@@ -71,10 +86,14 @@ export default function FlightLayer({ viewer }: FlightLayerProps) {
                 point.show = true;
                 (point as any).id = `flt-${f.icao24}`;
 
+                // Heading arrow character + altitude label in dense mode
                 if (labels && i < labels.length) {
                     const label = labels.get(i);
                     label.position = position;
-                    label.text = detectionDensity === "dense" ? (f.callsign || f.icao24) : "";
+                    const headingArrow = getHeadingArrow(f.heading);
+                    label.text = detectionDensity === "dense"
+                        ? `${headingArrow} ${f.callsign || f.icao24}`
+                        : "";
                     label.fillColor = color;
                     label.show = detectionDensity === "dense";
                 }
@@ -133,10 +152,13 @@ export default function FlightLayer({ viewer }: FlightLayerProps) {
 
         const points = new Cesium.PointPrimitiveCollection();
         const labels = new Cesium.LabelCollection();
+        const trailDs = new Cesium.CustomDataSource("flight-trails");
         viewer.scene.primitives.add(points);
         viewer.scene.primitives.add(labels);
+        viewer.dataSources.add(trailDs);
         pointCollectionRef.current = points;
         labelCollectionRef.current = labels;
+        trailDataSourceRef.current = trailDs;
 
         updateFlights().finally(() => setLayerLoading("flights", false));
         intervalRef.current = setInterval(updateFlights, UPDATE_INTERVALS.flights);
@@ -167,13 +189,40 @@ export default function FlightLayer({ viewer }: FlightLayerProps) {
                         squawk: f.squawk,
                     };
                     selectEntity(entity);
+
+                    // Show flight trail from position history
+                    if (trailDataSourceRef.current) {
+                        trailDataSourceRef.current.entities.removeAll();
+                        const history = positionHistoryRef.current.get(f.icao24);
+                        if (history && history.length > 2) {
+                            const trailPositions = history.map((h) =>
+                                Cesium.Cartesian3.fromDegrees(h.lon, h.lat, h.alt)
+                            );
+                            trailDataSourceRef.current.entities.add({
+                                polyline: {
+                                    positions: trailPositions,
+                                    width: 1.5,
+                                    material: new Cesium.ColorMaterialProperty(
+                                        Cesium.Color.fromCssColorString("#00ff41").withAlpha(0.5)
+                                    ),
+                                },
+                            });
+                        }
+                    }
                 }
+            } else if (trailDataSourceRef.current) {
+                trailDataSourceRef.current.entities.removeAll();
             }
         }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
         return () => {
             if (intervalRef.current) clearInterval(intervalRef.current);
             handler.destroy();
+            positionHistoryRef.current.clear();
+            if (trailDataSourceRef.current) {
+                viewer.dataSources.remove(trailDataSourceRef.current);
+                trailDataSourceRef.current = null;
+            }
             if (pointCollectionRef.current) {
                 viewer.scene.primitives.remove(pointCollectionRef.current);
                 pointCollectionRef.current = null;

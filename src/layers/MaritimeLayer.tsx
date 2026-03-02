@@ -2,7 +2,7 @@ import { useEffect, useRef, useCallback } from "react";
 import * as Cesium from "cesium";
 import { useLayerStore } from "@/stores/layerStore";
 import { useEntityStore } from "@/stores/entityStore";
-
+import { useAlertStore } from "@/stores/alertStore";
 import type { VesselEntity } from "@/types/entities";
 
 interface MaritimeLayerProps {
@@ -47,8 +47,12 @@ export default function MaritimeLayer({ viewer }: MaritimeLayerProps) {
     const updateLastFetch = useLayerStore((s) => s.updateLastFetch);
     const setLayerLoading = useLayerStore((s) => s.setLayerLoading);
     const selectEntity = useEntityStore((s) => s.selectEntity);
+    const addAlert = useAlertStore((s) => s.addAlert);
     const pointsRef = useRef<Cesium.PointPrimitiveCollection | null>(null);
+    const speedVectorDsRef = useRef<Cesium.CustomDataSource | null>(null);
     const vesselsRef = useRef<VesselData[]>([]);
+    const prevPositionsRef = useRef<Map<string, { lat: number; lon: number; time: number }>>(new Map());
+    const seenAnomaliesRef = useRef<Set<string>>(new Set());
     const wsRef = useRef<WebSocket | null>(null);
 
     const connectWS = useCallback(() => {
@@ -116,9 +120,72 @@ export default function MaritimeLayer({ viewer }: MaritimeLayerProps) {
 
         for (let i = vessels.length; i < points.length; i++) points.get(i).show = false;
 
+        // Speed vector lines — show projected position 5 min ahead
+        if (speedVectorDsRef.current) {
+            speedVectorDsRef.current.entities.removeAll();
+            for (const v of vessels) {
+                if (v.speed < 1 || !v.heading) continue;
+                const speedMs = v.speed * 0.514444; // knots to m/s
+                const distM = speedMs * 300; // 5 minutes
+                const headingRad = (v.heading * Math.PI) / 180;
+                const dLat = (distM * Math.cos(headingRad)) / 111320;
+                const dLon = (distM * Math.sin(headingRad)) / (111320 * Math.cos((v.lat * Math.PI) / 180));
+                const endLat = v.lat + dLat;
+                const endLon = v.lon + dLon;
+                const color = Cesium.Color.fromCssColorString(getVesselColor(v.vesselType)).withAlpha(0.4);
+                speedVectorDsRef.current.entities.add({
+                    polyline: {
+                        positions: Cesium.Cartesian3.fromDegreesArray([v.lon, v.lat, endLon, endLat]),
+                        width: 1,
+                        material: new Cesium.ColorMaterialProperty(color),
+                    },
+                });
+            }
+        }
+
+        // Anomaly detection
+        const now = Date.now();
+        for (const v of vessels) {
+            const prev = prevPositionsRef.current.get(v.mmsi);
+            if (prev) {
+                const dt = (now - prev.time) / 1000;
+                // Dark ship: same position for 30+ min but was previously moving
+                if (dt > 1800 && v.speed < 0.5 && Math.abs(v.lat - prev.lat) < 0.001 && Math.abs(v.lon - prev.lon) < 0.001) {
+                    const aKey = `dark-${v.mmsi}`;
+                    if (!seenAnomaliesRef.current.has(aKey)) {
+                        seenAnomaliesRef.current.add(aKey);
+                        addAlert({
+                            id: `ais-${aKey}-${now}`, timestamp: now, level: "medium",
+                            title: `AIS ANOMALY: ${v.name}`,
+                            description: `Vessel ${v.mmsi} stationary/dark for ${Math.round(dt / 60)}min`,
+                            source: "maritime", lat: v.lat, lon: v.lon,
+                        });
+                    }
+                }
+                // Speed anomaly: sudden large speed change
+                if (prev.time > 0 && dt < 600) {
+                    const prevDist = Math.sqrt((v.lat - prev.lat) ** 2 + (v.lon - prev.lon) ** 2) * 111320;
+                    const impliedSpeed = prevDist / dt;
+                    if (v.speed > 30 && impliedSpeed < 2) {
+                        const aKey = `spd-${v.mmsi}`;
+                        if (!seenAnomaliesRef.current.has(aKey)) {
+                            seenAnomaliesRef.current.add(aKey);
+                            addAlert({
+                                id: `ais-${aKey}-${now}`, timestamp: now, level: "low",
+                                title: `SPEED ANOMALY: ${v.name}`,
+                                description: `Reported ${v.speed.toFixed(0)}kts but GPS shows minimal movement`,
+                                source: "maritime", lat: v.lat, lon: v.lon,
+                            });
+                        }
+                    }
+                }
+            }
+            prevPositionsRef.current.set(v.mmsi, { lat: v.lat, lon: v.lon, time: now });
+        }
+
         updateEntityCount("maritime", vessels.length);
         updateLastFetch("maritime");
-    }, [updateEntityCount, updateLastFetch]);
+    }, [updateEntityCount, updateLastFetch, addAlert]);
 
     useEffect(() => {
         if (!viewer || !enabled) {
@@ -129,8 +196,11 @@ export default function MaritimeLayer({ viewer }: MaritimeLayerProps) {
 
         setLayerLoading("maritime", true);
         const points = new Cesium.PointPrimitiveCollection();
+        const vectorDs = new Cesium.CustomDataSource("vessel-vectors");
         viewer.scene.primitives.add(points);
+        viewer.dataSources.add(vectorDs);
         pointsRef.current = points;
+        speedVectorDsRef.current = vectorDs;
 
         connectWS();
         setLayerLoading("maritime", false);
@@ -156,6 +226,7 @@ export default function MaritimeLayer({ viewer }: MaritimeLayerProps) {
         return () => {
             handler.destroy();
             if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
+            if (speedVectorDsRef.current) { viewer.dataSources.remove(speedVectorDsRef.current); speedVectorDsRef.current = null; }
             if (pointsRef.current) { viewer.scene.primitives.remove(pointsRef.current); pointsRef.current = null; }
         };
     }, [viewer, enabled, connectWS, setLayerLoading, selectEntity]);

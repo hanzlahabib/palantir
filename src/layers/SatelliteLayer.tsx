@@ -28,8 +28,10 @@ export default function SatelliteLayer({ viewer }: SatelliteLayerProps) {
     const detectionDensity = useCameraStore((s) => s.detectionDensity);
     const pointCollectionRef = useRef<Cesium.PointPrimitiveCollection | null>(null);
     const labelCollectionRef = useRef<Cesium.LabelCollection | null>(null);
+    const orbitPolylineRef = useRef<Cesium.Entity | null>(null);
     const satDataRef = useRef<SatData[]>([]);
     const animFrameRef = useRef<number>(0);
+    const selectedSatRef = useRef<number | null>(null);
 
     const propagateAll = useCallback(() => {
         if (!viewer || !pointCollectionRef.current) return;
@@ -158,6 +160,49 @@ export default function SatelliteLayer({ viewer }: SatelliteLayerProps) {
 
         loadSatellites();
 
+        // Orbit path rendering for selected satellite
+        function showOrbitPath(sat: SatData) {
+            // Remove previous orbit path
+            if (orbitPolylineRef.current) {
+                viewer!.entities.remove(orbitPolylineRef.current);
+                orbitPolylineRef.current = null;
+            }
+            selectedSatRef.current = sat.noradId;
+
+            // Propagate 360 points over one orbit (~90-100min for LEO)
+            const positions: Cesium.Cartesian3[] = [];
+            const now = new Date();
+            const periodMin = 100; // approximate
+            const stepMs = (periodMin * 60 * 1000) / 360;
+
+            for (let i = 0; i < 360; i++) {
+                const t = new Date(now.getTime() + i * stepMs);
+                try {
+                    const posVel = satellite.propagate(sat.satrec, t);
+                    if (!posVel.position || typeof posVel.position === "boolean") continue;
+                    const gmst = satellite.gstime(t);
+                    const geo = satellite.eciToGeodetic(posVel.position as satellite.EciVec3<number>, gmst);
+                    positions.push(Cesium.Cartesian3.fromDegrees(
+                        satellite.degreesLong(geo.longitude),
+                        satellite.degreesLat(geo.latitude),
+                        geo.height * 1000
+                    ));
+                } catch { /* skip bad propagation */ }
+            }
+
+            if (positions.length > 10) {
+                orbitPolylineRef.current = viewer!.entities.add({
+                    polyline: {
+                        positions,
+                        width: 1,
+                        material: new Cesium.ColorMaterialProperty(
+                            Cesium.Color.fromCssColorString("#00ffff").withAlpha(0.4)
+                        ),
+                    },
+                });
+            }
+        }
+
         // Click handler
         const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
         handler.setInputAction((click: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
@@ -171,22 +216,37 @@ export default function SatelliteLayer({ viewer }: SatelliteLayerProps) {
                     if (posVel.position && typeof posVel.position !== "boolean") {
                         const gmst = satellite.gstime(now);
                         const geo = satellite.eciToGeodetic(posVel.position as satellite.EciVec3<number>, gmst);
+                        const altKm = geo.height;
+                        const periodMin = 2 * Math.PI * Math.sqrt(Math.pow(6371 + altKm, 3) / 398600.4418) / 60;
+                        const velocity = posVel.velocity && typeof posVel.velocity !== "boolean"
+                            ? Math.sqrt(posVel.velocity.x ** 2 + posVel.velocity.y ** 2 + posVel.velocity.z ** 2)
+                            : undefined;
                         const entity: SatelliteEntity = {
                             id: `sat-${sat.noradId}`,
                             layerId: "satellites",
                             name: sat.name,
                             lat: satellite.degreesLat(geo.latitude),
                             lon: satellite.degreesLong(geo.longitude),
-                            alt: geo.height * 1000,
+                            alt: altKm * 1000,
                             timestamp: Date.now(),
                             noradId: sat.noradId,
-                            orbitType: classifyOrbit(geo.height),
+                            orbitType: classifyOrbit(altKm),
                             category: "active",
                             tle1: sat.line1,
                             tle2: sat.line2,
+                            velocity,
+                            period: periodMin,
                         };
                         selectEntity(entity);
+                        showOrbitPath(sat);
                     }
+                }
+            } else {
+                // Clicked elsewhere — remove orbit path
+                if (orbitPolylineRef.current) {
+                    viewer.entities.remove(orbitPolylineRef.current);
+                    orbitPolylineRef.current = null;
+                    selectedSatRef.current = null;
                 }
             }
         }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
@@ -195,6 +255,10 @@ export default function SatelliteLayer({ viewer }: SatelliteLayerProps) {
             cancelled = true;
             cancelAnimationFrame(animFrameRef.current);
             handler.destroy();
+            if (orbitPolylineRef.current) {
+                viewer.entities.remove(orbitPolylineRef.current);
+                orbitPolylineRef.current = null;
+            }
             if (pointCollectionRef.current) {
                 viewer.scene.primitives.remove(pointCollectionRef.current);
                 pointCollectionRef.current = null;

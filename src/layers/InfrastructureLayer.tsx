@@ -48,6 +48,45 @@ const INFRASTRUCTURE: InfraAsset[] = [
     { name: "Bab el-Mandeb", lat: 12.583, lon: 43.333, type: "port", subtype: "chokepoint" },
 ];
 
+// Major submarine cable routes (simplified waypoints)
+const SUBMARINE_CABLES: { name: string; color: string; coords: [number, number][] }[] = [
+    {
+        name: "Transatlantic (TAT-14)",
+        color: "#00aaff",
+        coords: [[-5.5, 50.0], [-20, 48], [-40, 44], [-55, 42], [-70, 40.7]],
+    },
+    {
+        name: "SEA-ME-WE 3",
+        color: "#ff8800",
+        coords: [[103.8, 1.3], [95, 5], [76, 10], [56, 25], [43, 12.5], [32.5, 30], [29, 41], [12, 37], [-5, 36]],
+    },
+    {
+        name: "Pacific Crossing (PC-1)",
+        color: "#44ff44",
+        coords: [[139.7, 35.7], [160, 40], [180, 42], [-160, 45], [-140, 42], [-124, 37.8]],
+    },
+    {
+        name: "Africa Coast to Europe (ACE)",
+        color: "#ff44ff",
+        coords: [[-5, 36], [-10, 28], [-16, 18], [-17, 14.7], [-13.5, 9.5], [-4, 5.3], [3.4, 6.4]],
+    },
+    {
+        name: "Asia-America Gateway (AAG)",
+        color: "#ffff00",
+        coords: [[106.7, 10.8], [109, 8], [115, 3], [120, -5], [140, -10], [170, -5], [-170, 10], [-155, 20], [-120, 33]],
+    },
+    {
+        name: "FALCON",
+        color: "#00ffff",
+        coords: [[56, 25], [54, 24], [51, 25], [48, 29], [46, 28], [43.5, 13.5], [45, 12.1]],
+    },
+    {
+        name: "EIG (Europe India Gateway)",
+        color: "#aa88ff",
+        coords: [[-1, 51.5], [-5, 36], [10, 36], [30, 31], [33, 30], [43, 12], [56, 25], [65, 23], [73, 19]],
+    },
+];
+
 const TYPE_COLORS: Record<string, string> = {
     military: "#4488ff",
     nuclear: "#ff8800",
@@ -77,6 +116,7 @@ export default function InfrastructureLayer({ viewer }: InfrastructureLayerProps
         setLayerLoading("infrastructure", true);
         const ds = new Cesium.CustomDataSource("infrastructure");
 
+        // Render infrastructure points
         for (const asset of INFRASTRUCTURE) {
             const color = Cesium.Color.fromCssColorString(TYPE_COLORS[asset.type] || "#ffffff");
 
@@ -104,9 +144,49 @@ export default function InfrastructureLayer({ viewer }: InfrastructureLayerProps
             });
         }
 
+        // Render submarine cable polylines
+        for (const cable of SUBMARINE_CABLES) {
+            const positions = cable.coords.map(([lon, lat]) =>
+                Cesium.Cartesian3.fromDegrees(lon, lat, -100) // slightly below surface
+            );
+            const cableColor = Cesium.Color.fromCssColorString(cable.color);
+
+            ds.entities.add({
+                id: `cable-${cable.name}`,
+                polyline: {
+                    positions,
+                    width: 1.5,
+                    material: new Cesium.PolylineGlowMaterialProperty({
+                        glowPower: 0.3,
+                        color: cableColor.withAlpha(0.6),
+                    }),
+                    clampToGround: true,
+                },
+            });
+
+            // Label at midpoint
+            const mid = cable.coords[Math.floor(cable.coords.length / 2)];
+            if (mid) {
+                ds.entities.add({
+                    id: `cable-label-${cable.name}`,
+                    position: Cesium.Cartesian3.fromDegrees(mid[0], mid[1]),
+                    label: {
+                        text: `🔌 ${cable.name}`,
+                        font: "9px JetBrains Mono",
+                        fillColor: cableColor,
+                        outlineColor: Cesium.Color.BLACK,
+                        outlineWidth: 2,
+                        style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+                        scaleByDistance: new Cesium.NearFarScalar(100000, 0.8, 5000000, 0.0),
+                        scale: 0.6,
+                    },
+                });
+            }
+        }
+
         viewer.dataSources.add(ds);
         dsRef.current = ds;
-        updateEntityCount("infrastructure", INFRASTRUCTURE.length);
+        updateEntityCount("infrastructure", INFRASTRUCTURE.length + SUBMARINE_CABLES.length);
         setLayerLoading("infrastructure", false);
 
         return () => {
